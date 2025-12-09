@@ -43,9 +43,14 @@ mosquitto_pub -h localhost -p 8883 -t "secure/test" -m "hello mTLS" \
 
 
 
+sudo mkdir -p /usr/lib/mosquitto/plugins
+sudo cp /home/pqkhai/code/zero_trust_mosquitto_poc/plugin.so /usr/lib/mosquitto/plugins/
+sudo chown mosquitto:mosquitto /usr/lib/mosquitto/plugins/plugin.so
 
 #plugin
-plugin /home/pqkhai/code/zero_trust/plugin.so
+plugin /usr/lib/mosquitto/plugins/plugin.so
 plugin_opt_config_path . 
 allow_anonymous true
+
+
 
