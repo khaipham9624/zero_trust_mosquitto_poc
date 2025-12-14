@@ -1,98 +1,160 @@
 #include <stdio.h>
 #include <string.h>
-#include <mosquitto_broker.h>
-#include <mosquitto_plugin.h>
+
 #include <mosquitto.h>
-#include <time.h>
+#include <mosquitto_plugin.h>
+#include <mosquitto_broker.h>
+#define MAX_BLACKLIST 128
+#define MAX_ID_LEN    64
 
-static mosquitto_plugin_id_t *plg_id;
+static char blacklist[MAX_BLACKLIST][MAX_ID_LEN];
+static int blacklist_count = 0;
 
-/* Track publish rate per client */
-typedef struct {
-    char client_id[128];
-    long last_pub_ts;
-} client_info_t;
+static void blacklist_add(const char *clientid)
+{
+    if (!clientid) return;
 
-static client_info_t client_db[1024];
-static int client_count = 0;
+    for (int i = 0; i < blacklist_count; i++) {
+        if (strcmp(blacklist[i], clientid) == 0)
+            return; // đã có
+    }
 
-static long now_ms() {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    if (blacklist_count < MAX_BLACKLIST) {
+        strncpy(blacklist[blacklist_count],
+                clientid, MAX_ID_LEN - 1);
+        blacklist_count++;
+    }
 }
 
-static long get_last_pub(const char *client_id) {
-    for(int i=0;i<client_count;i++){
-        if(strcmp(client_db[i].client_id, client_id)==0)
-            return client_db[i].last_pub_ts;
+static int is_blacklisted(const char *clientid)
+{
+    if (!clientid) return 0;
+
+    for (int i = 0; i < blacklist_count; i++) {
+        if (strcmp(blacklist[i], clientid) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int basic_auth(int event, void *event_data, void *userdata)
+{
+    struct mosquitto_evt_basic_auth *ed = event_data;
+    const char *clientid = mosquitto_client_id(ed->client);
+
+    if (is_blacklisted(clientid)) {
+        mosquitto_log_printf(MOSQ_LOG_WARNING,
+            "[BL] reject blacklisted clientid=%s",
+            clientid);
+        return MOSQ_ERR_AUTH;
+    }
+
+    return MOSQ_ERR_SUCCESS;
+}
+
+
+/* ===================================================== */
+/* Plugin version – BẮT BUỘC */
+int mosquitto_plugin_version(int supported_version_count,
+                             const int *supported_versions)
+{
+    for (int i = 0; i < supported_version_count; i++) {
+        if (supported_versions[i] == MOSQ_PLUGIN_VERSION)
+            return MOSQ_PLUGIN_VERSION;
     }
     return -1;
 }
 
-static void update_pub(const char *client_id) {
-    for(int i=0;i<client_count;i++){
-        if(strcmp(client_db[i].client_id, client_id)==0){
-            client_db[i].last_pub_ts = now_ms();
-            return;
-        }
+
+// static int acl_check(int event, void *event_data, void *userdata)
+// {
+//     struct mosquitto_evt_acl_check *ed = event_data;
+//     const char *clientid = mosquitto_client_id(ed->client);
+
+//     if (ed->access == MOSQ_ACL_SUBSCRIBE &&
+//         strcmp(ed->topic, "#") == 0) {
+
+//         mosquitto_log_printf(MOSQ_LOG_WARNING,
+//             "[BL] kick clientid=%s (subscribe #)",
+//             clientid);
+
+//         blacklist_add(clientid);
+
+//         mosquitto_disconnect_client(
+//             ed->client,
+//             MOSQ_ERR_NOT_AUTHORIZED,
+//             NULL
+//         );
+
+//         return MOSQ_ERR_ACL_DENIED;
+//     }
+
+//     return MOSQ_ERR_ACL_DENIED;
+// }
+
+/* ===================================================== */
+/* ACL CHECK: kiểm soát publish / subscribe */
+static int acl_check(int event, void *event_data, void *userdata)
+{
+    struct mosquitto_evt_acl_check *ed = event_data;
+    const char *clientid = mosquitto_client_id(ed->client);
+    const char *topic = ed->topic;
+    mosquitto_log_printf(MOSQ_LOG_INFO, "check acl client %s\n", clientid);
+
+    if (!clientid || !topic)
+        return MOSQ_ERR_ACL_DENIED;
+
+    /* Rule ví dụ */
+    char allow_pub[256];
+    snprintf(allow_pub, sizeof(allow_pub),
+             "device/%s/tx", clientid);
+
+    if (ed->access == MOSQ_ACL_READ || ed->access == MOSQ_ACL_SUBSCRIBE || (ed->access == MOSQ_ACL_WRITE &&
+        strcmp(topic, allow_pub) == 0)) {
+        return MOSQ_ERR_SUCCESS;
     }
-    strcpy(client_db[client_count].client_id, client_id);
-    client_db[client_count].last_pub_ts = now_ms();
-    client_count++;
+
+    return MOSQ_ERR_ACL_DENIED;
 }
 
-/* MAIN HOOK - when PUB or SUB occurs */
-int mosquitto_auth_acl_check_v2(
-    mosquitto_plugin_id_t *plugin_id,
-    int event,
-    struct mosquitto *client,
-    const char *topic,
-    int access,
-    const void *payload,
-    int payloadlen)
+static int on_message(int event, void *event_data, void *userdata)
 {
-    const char *client_id = mosquitto_client_id(client);
+    struct mosquitto_evt_message *ed = event_data;
+    /* xử lý message */
+    return MOSQ_ERR_SUCCESS;
+}
 
-    printf("[PLUGIN] Client=%s Access=%d Topic=%s\n",
-        client_id, access, topic);
-
-    /* Handle SUBSCRIBE */
-    if(access == MOSQ_ACL_SUBSCRIBE){
-        printf("  -> SUBSCRIBE request accepted\n");
-        return MOSQ_ERR_SUCCESS;
-    }
-
-    /* Handle PUBLISH */
-    if(access == MOSQ_ACL_WRITE){
-        long last = get_last_pub(client_id);
-        long now  = now_ms();
-
-        if(last > 0 && (now - last) < 5000){
-            printf("  -> ANOMALY: publish too fast (%ld ms)\n",
-                now - last);
-            return MOSQ_ERR_ACL_DENIED;
-        }
-
-        update_pub(client_id);
-        printf("  -> PUBLISH accepted\n");
-        return MOSQ_ERR_SUCCESS;
-    }
+/* ===================================================== */
+/* Init */
+int mosquitto_plugin_init(mosquitto_plugin_id_t *id,
+                          void **userdata,
+                          struct mosquitto_opt *opts,
+                          int opt_count)
+{
+    mosquitto_log_printf(MOSQ_LOG_NOTICE,
+        "[ZT] plugin init");
+    mosquitto_callback_register(
+        id, 
+        MOSQ_EVT_BASIC_AUTH, 
+        basic_auth, NULL, NULL);
+    mosquitto_callback_register(
+        id,
+        MOSQ_EVT_ACL_CHECK,
+        acl_check,
+        NULL, NULL);
+    mosquitto_callback_register(id,
+        MOSQ_EVT_MESSAGE,
+        on_message,
+        NULL, NULL);
 
     return MOSQ_ERR_SUCCESS;
 }
 
-/* Plugin init */
-int mosquitto_plugin_init(mosquitto_plugin_id_t *identifier, void **userdata, struct mosquitto_opt *options, int option_count)
-{
-    plg_id = identifier;
-    mosquitto_log_printf(MOSQ_LOG_INFO, "[PLUGIN] Zero Trust plugin loaded");
-    return MOSQ_ERR_SUCCESS;
-}
-
+/* ===================================================== */
 /* Cleanup */
-int mosquitto_plugin_cleanup(void *userdata, struct mosquitto_opt *options, int option_count)
+int mosquitto_plugin_cleanup(void *userdata,
+                             struct mosquitto_opt *opts,
+                             int opt_count)
 {
-    mosquitto_log_printf(MOSQ_LOG_INFO, "[PLUGIN] Zero Trust plugin unloaded");
     return MOSQ_ERR_SUCCESS;
 }
