@@ -4,11 +4,53 @@
 #include <mosquitto.h>
 #include <mosquitto_plugin.h>
 #include <mosquitto_broker.h>
+#include <time.h>
 #define MAX_BLACKLIST 128
 #define MAX_ID_LEN    64
 
+
+#define MAX_CLIENTS 128
+#define RATE_LIMIT  5     // messages
+#define TIME_WINDOW 5     // seconds
+
+struct client_rate {
+    char clientid[64];
+    int count;
+    time_t window_start;
+};
+
+static struct client_rate rates[MAX_CLIENTS];
+static int rate_count = 0;
+
 static char blacklist[MAX_BLACKLIST][MAX_ID_LEN];
 static int blacklist_count = 0;
+
+static struct client_rate *get_rate(const char *clientid)
+{
+    time_t now = time(NULL);
+
+    for (int i = 0; i < rate_count; i++) {
+        if (strcmp(rates[i].clientid, clientid) == 0) {
+            /* reset window nếu quá thời gian */
+            if (now - rates[i].window_start > TIME_WINDOW) {
+                rates[i].count = 0;
+                rates[i].window_start = now;
+            }
+            return &rates[i];
+        }
+    }
+
+    if (rate_count < MAX_CLIENTS) {
+        strncpy(rates[rate_count].clientid,
+                clientid, sizeof(rates[rate_count].clientid) - 1);
+        rates[rate_count].count = 0;
+        rates[rate_count].window_start = now;
+        return &rates[rate_count++];
+    }
+
+    return NULL;
+}
+
 
 static void blacklist_add(const char *clientid)
 {
@@ -120,10 +162,44 @@ static int acl_check(int event, void *event_data, void *userdata)
 static int on_message(int event, void *event_data, void *userdata)
 {
     struct mosquitto_evt_message *ed = event_data;
-    /* xử lý message */
+    const char *clientid = mosquitto_client_id(ed->client);
+    time_t now = time(NULL);
+
+    if (!clientid)
+        return MOSQ_ERR_SUCCESS;
+
+    /* nếu đã blacklist thì kick luôn */
+    if (is_blacklisted(clientid)) {
+        mosquitto_kick_client_by_clientid(
+            clientid,
+            false
+        );
+        return MOSQ_ERR_SUCCESS;
+    }
+
+    struct client_rate *r = get_rate(clientid);
+    if (!r)
+        return MOSQ_ERR_SUCCESS;
+
+    r->count++;
+
+    if (r->count > RATE_LIMIT &&
+        (now - r->window_start) <= TIME_WINDOW) {
+
+        mosquitto_log_printf(MOSQ_LOG_WARNING,
+            "[RL] client=%s exceeded rate (%d/%ds) -> kick",
+            clientid, RATE_LIMIT, TIME_WINDOW);
+
+        blacklist_add(clientid);
+
+        mosquitto_kick_client_by_clientid(
+            clientid,
+            false
+        );
+    }
+
     return MOSQ_ERR_SUCCESS;
 }
-
 /* ===================================================== */
 /* Init */
 int mosquitto_plugin_init(mosquitto_plugin_id_t *id,

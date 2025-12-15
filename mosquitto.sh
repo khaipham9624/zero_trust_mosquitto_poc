@@ -50,7 +50,8 @@ sudo chown mosquitto:mosquitto /usr/lib/mosquitto/plugins/plugin.so
 sudo mosquitto -c /etc/mosquitto/mosquitto.conf -v
 
 
-mosquitto_pub -h localhost -t "test/topic" -m "Hello MQTT!" -i 1
+mosquitto_sub -h localhost -t "#" -v
+mosquitto_pub -l -t device/1/tx -i 1
 
 #plugin
 plugin /usr/lib/mosquitto/plugins/plugin.so
