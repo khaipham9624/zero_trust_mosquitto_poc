@@ -1,6 +1,8 @@
 sudo apt install mosquitto mosquitto-dev
 sudo apt install build-essential
 sudo apt install libmosquitto-dev
+sudo apt install libcurl4-openssl-dev
+sudo apt install libjson-c-dev
 
 # Start broker
 # sudo systemctl status mosquitto
@@ -49,14 +51,25 @@ sudo cp /home/pqkhai/code/zero_trust_mosquitto_poc/plugin.so /usr/lib/mosquitto/
 sudo chown mosquitto:mosquitto /usr/lib/mosquitto/plugins/plugin.so
 sudo mosquitto -c /etc/mosquitto/mosquitto.conf -v
 
-
+python3 pdp_server.py
+sudo tail -F /var/log/mosquitto/mosquitto.log
 mosquitto_sub -h localhost -t "#" -v
 mosquitto_pub -l -t device/1/tx -i 1
 
-#plugin
-plugin /usr/lib/mosquitto/plugins/plugin.so
-plugin_opt_config_path . 
-allow_anonymous true
+cat /etc/mosquitto/mosquitto.conf
+    # Place your local configuration in /etc/mosquitto/conf.d/
+    #
+    # A full description of the configuration file is at
+    # /usr/share/doc/mosquitto/examples/mosquitto.conf.example
+
+    persistence true
+    persistence_location /var/lib/mosquitto/
+
+    log_dest file /var/log/mosquitto/mosquitto.log
+    plugin /usr/lib/mosquitto/plugins/plugin.so
+    plugin_opt_config_path .
+    allow_anonymous true
 
 
+    include_dir /etc/mosquitto/conf.d
 

@@ -5,6 +5,18 @@
 #include <mosquitto_plugin.h>
 #include <mosquitto_broker.h>
 #include <time.h>
+#include <curl/curl.h>
+#include <json-c/json.h>
+#include <time.h>
+
+/* buffer nhận HTTP response */
+struct http_resp {
+    char data[512];
+    size_t len;
+};
+
+#define MAX_PAYLOAD_SIZE 1024
+
 #define MAX_BLACKLIST 128
 #define MAX_ID_LEN    64
 
@@ -24,6 +36,23 @@ static int rate_count = 0;
 
 static char blacklist[MAX_BLACKLIST][MAX_ID_LEN];
 static int blacklist_count = 0;
+
+static size_t write_callback(void *contents, size_t size,
+                             size_t nmemb, void *userp)
+{
+    size_t realsize = size * nmemb;
+    struct http_resp *resp = userp;
+
+    if (resp->len + realsize >= sizeof(resp->data) - 1)
+        realsize = sizeof(resp->data) - resp->len - 1;
+
+    memcpy(resp->data + resp->len, contents, realsize);
+    resp->len += realsize;
+    resp->data[resp->len] = '\0';
+
+    return size * nmemb;
+}
+
 
 static struct client_rate *get_rate(const char *clientid)
 {
@@ -158,48 +187,91 @@ static int acl_check(int event, void *event_data, void *userdata)
 
     return MOSQ_ERR_ACL_DENIED;
 }
-
 static int on_message(int event, void *event_data, void *userdata)
 {
     struct mosquitto_evt_message *ed = event_data;
     const char *clientid = mosquitto_client_id(ed->client);
-    time_t now = time(NULL);
 
     if (!clientid)
         return MOSQ_ERR_SUCCESS;
 
-    /* nếu đã blacklist thì kick luôn */
+    /* Nếu client đã blacklist */
     if (is_blacklisted(clientid)) {
-        mosquitto_kick_client_by_clientid(
-            clientid,
-            false
-        );
+        mosquitto_kick_client_by_clientid(clientid, false);
         return MOSQ_ERR_SUCCESS;
     }
 
-    struct client_rate *r = get_rate(clientid);
-    if (!r)
-        return MOSQ_ERR_SUCCESS;
+    /* build JSON request */
+    json_object *root = json_object_new_object();
+    json_object_object_add(root, "client_id",
+        json_object_new_string(clientid));
+    json_object_object_add(root, "topic",
+        json_object_new_string(ed->topic));
+    json_object_object_add(root, "payload",
+        json_object_new_string_len(
+            ed->payload,
+            ed->payloadlen));
 
-    r->count++;
+    const char *json_str =
+        json_object_to_json_string(root);
 
-    if (r->count > RATE_LIMIT &&
-        (now - r->window_start) <= TIME_WINDOW) {
+    /* HTTP call */
+    CURL *curl = curl_easy_init();
+    struct http_resp resp;
+    resp.len = 0;
 
-        mosquitto_log_printf(MOSQ_LOG_WARNING,
-            "[RL] client=%s exceeded rate (%d/%ds) -> kick",
-            clientid, RATE_LIMIT, TIME_WINDOW);
+    if (curl) {
+        struct curl_slist *headers = NULL;
+        headers = curl_slist_append(
+            headers, "Content-Type: application/json");
 
-        blacklist_add(clientid);
+        curl_easy_setopt(curl, CURLOPT_URL,
+            "http://127.0.0.1:5000/rate_limit");
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_str);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 300);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
+            write_callback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
 
-        mosquitto_kick_client_by_clientid(
-            clientid,
-            false
-        );
+        CURLcode res = curl_easy_perform(curl);
+
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+
+        if (res == CURLE_OK && resp.len > 0) {
+            json_object *jresp =
+                json_tokener_parse(resp.data);
+            json_object *status;
+
+            if (jresp &&
+                json_object_object_get_ex(
+                    jresp, "status", &status)) {
+
+                const char *s =
+                    json_object_get_string(status);
+
+                if (!strcmp(s, "DENY")) {
+                    mosquitto_log_printf(
+                        MOSQ_LOG_WARNING,
+                        "Rate limit exceeded -> kick %s",
+                        clientid);
+
+                    blacklist_add(clientid);
+                    mosquitto_kick_client_by_clientid(
+                        clientid, false);
+                }
+            }
+            if (jresp)
+                json_object_put(jresp);
+        }
     }
 
+    json_object_put(root);
     return MOSQ_ERR_SUCCESS;
 }
+
 /* ===================================================== */
 /* Init */
 int mosquitto_plugin_init(mosquitto_plugin_id_t *id,
