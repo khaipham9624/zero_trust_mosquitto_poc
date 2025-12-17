@@ -25,24 +25,30 @@ cafile /home/pqkhai/ca.d/rootCA.crt
 certfile /home/pqkhai/broker/broker.crt
 keyfile /home/pqkhai/broker/broker.key
 
-require_certificate true
+require_certificate true #mTLS. Set false for the first setup
 use_identity_as_username true
 
 
 
 
 mosquitto_sub -h localhost -p 8883 -t "secure/#" -v \
-  --cafile /home/pqkhai/ca.d/rootCA.crt \
-  --cert /home/pqkhai/subcriber/subcriber.crt \
-  --key /home/pqkhai/subcriber/subcriber.key
-
+    --cert /home/pqkhai/subcriber/subcriber.crt \
+    --key /home/pqkhai/subcriber/subcriber.key \
+    --cafile /home/pqkhai/ca.d/rootCA.crt
+mosquitto_sub -h localhost -p 8883 -t "secure/#" -v \
+    --cert /home/pqkhai/subcriber/subcriber.crt \
+    --key /home/pqkhai/subcriber/subcriber.key \
+    --capath /home/pqkhai/ca.d/
 
 mosquitto_pub -h localhost -p 8883 -t "secure/test" -m "hello mTLS" \
-  --cafile /home/pqkhai/ca.d/rootCA.crt \
-  --cert /home/pqkhai/publisher/publisher.crt \
-  --key /home/pqkhai/publisher/publisher.key
+    --cert /home/pqkhai/publisher/publisher.crt \
+    --key /home/pqkhai/publisher/publisher.key \
+    --cafile /home/pqkhai/ca.d/rootCA.crt
 
-
+mosquitto_pub -h localhost -p 8883 -t "secure/test" -m "hello mTLS" \
+    --cert /home/pqkhai/publisher/publisher.crt \
+    --key /home/pqkhai/publisher/publisher.key \
+    --capath /home/pqkhai/ca.d
 
 sudo mkdir -p /usr/lib/mosquitto/plugins
 
@@ -56,6 +62,8 @@ sudo tail -F /var/log/mosquitto/mosquitto.log
 mosquitto_sub -h localhost -t "#" -v
 mosquitto_pub -l -t device/1/tx -i 1
 
+
+
 cat /etc/mosquitto/mosquitto.conf
     # Place your local configuration in /etc/mosquitto/conf.d/
     #
@@ -67,9 +75,25 @@ cat /etc/mosquitto/mosquitto.conf
 
     log_dest file /var/log/mosquitto/mosquitto.log
     plugin /usr/lib/mosquitto/plugins/plugin.so
-    plugin_opt_config_path .
-    allow_anonymous true
+    #plugin_opt_config_path .
+    #allow_anonymous true
 
 
     include_dir /etc/mosquitto/conf.d
 
+
+cat /etc/mosquitto/conf.d/ssl.conf
+    listener 8883
+    protocol mqtt
+    #cafile /home/pqkhai/ca.d/rootCA.crt
+    capath /home/pqkhai/ca.d
+    certfile /home/pqkhai/broker/broker.crt
+    keyfile /home/pqkhai/broker/broker.key
+
+    require_certificate true
+    #require_certificate false
+    #use_identity_as_username false
+    allow_anonymous true
+
+
+mosquitto -c /etc/mosquitto/mosquitto.conf -v # OK. You may see fail to write logs - just modify log file permission!!
